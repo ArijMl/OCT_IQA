@@ -1,0 +1,107 @@
+import torch
+import torchvision.transforms as transforms
+from PIL import ImageEnhance, Image, ImageOps
+import os
+from openpyxl import Workbook
+import locale
+import random
+import shutil
+import matplotlib.pyplot as plt
+
+locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+import locale
+locale.getpreferredencoding = lambda: "UTF-8"
+
+# Set the device
+device = torch.device("cuda") if torch.cuda.is_available() else "cpu"
+
+# Load the model
+model = torch.hub.load(repo_or_dir="miccunifi/ARNIQA", source="github", model="ARNIQA",
+                       regressor_dataset="live")    # You can choose any of the available datasets
+model.eval().to(device)
+
+# Define the preprocessing pipeline
+preprocess = transforms.Compose([
+    transforms.Resize((224, 224)),  # Resize image to 224x224 pixels
+    transforms.ColorJitter(brightness=2, contrast=0.5),  # Adjust brightness and contrast
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
+# Function to perform center and corners crop
+def center_corners_crop(img, crop_size):
+    width, height = img.size
+    left = (width - crop_size) / 2
+    top = (height - crop_size) / 2
+    right = (width + crop_size) / 2
+    bottom = (height + crop_size) / 2
+    center_crop = img.crop((left, top, right, bottom))
+    top_left_crop = img.crop((0, 0, crop_size, crop_size))
+    top_right_crop = img.crop((0, height - crop_size, crop_size, height))
+    bottom_left_crop = img.crop((width - crop_size, 0, width, crop_size))
+    bottom_right_crop = img.crop((width - crop_size, height - crop_size, width, height))
+    return [center_crop, top_left_crop, top_right_crop, bottom_left_crop, bottom_right_crop]
+
+# Directory containing the images
+directory = "/content/drive/MyDrive/DATA_CROPED/NORMAL_CROPED"
+
+# List all files in the directory
+image_files = [file for file in os.listdir(directory) if file.endswith(('jpg', 'jpeg', 'png'))]
+
+# Create Excel workbooks and sheets
+bad_wb = Workbook()
+bad_ws = bad_wb.active
+bad_ws.append(["Image", "Quality Score"])
+
+good_wb = Workbook()
+good_ws = good_wb.active
+good_ws.append(["Image", "Quality Score"])
+
+# Create the directory if it doesn't exist
+good_images_directory = "/content/drive/MyDrive/SCORES/NORMAL_Bonne_Qualité"
+os.makedirs(good_images_directory, exist_ok=True)
+
+# Create a loop to compute quality scores for each image
+for filename in image_files:
+    # Specify the path to the image
+    img_path = os.path.join(directory, filename)
+
+    # Load the image
+    img = Image.open(img_path).convert("RGB")
+    original_img = img.copy()  # Keep a copy of the original image
+
+    # Get the half-scale image
+    img_ds = transforms.Resize((img.size[1] // 2, img.size[0] // 2))(img)
+
+    # Get the center and corners crops
+    img = center_corners_crop(img, crop_size=224)
+    img_ds = center_corners_crop(img_ds, crop_size=224)
+
+    # Preprocess the images
+    img = [preprocess(crop) for crop in img]
+    img = torch.stack(img, dim=0).to(device)
+    img_ds = [preprocess(crop) for crop in img_ds]
+    img_ds = torch.stack(img_ds, dim=0).to(device)
+
+    # Compute the quality score
+    with torch.no_grad(), torch.cuda.amp.autocast():
+        score = model(img, img_ds, return_embedding=False, scale_score=True)
+        score = score.mean(0)
+
+    # Print the filename along with its quality score
+    print(f"Image: {filename}, Quality score: {score.item()}")
+
+    # Determine which Excel file to write the quality score to
+    if score.item() <= 0.5:
+        bad_ws.append([filename, score.item()])
+    else:
+        good_ws.append([filename, score.item()])
+        # Determine if the image has a good score and save it to the directory
+        shutil.copy(img_path, os.path.join(good_images_directory, filename))
+
+# Save the Excel files
+bad_wb.save("/content/drive/MyDrive/bad_quality_scores_TEST_ARNIQA_Modifié.xlsx")
+good_wb.save("/content/drive/MyDrive/good_quality_scores_TEST_ARNIQA_Modifié.xlsx")
+
+print("Excel files saved successfully.")
+print("Images with good quality scores saved successfully.")
